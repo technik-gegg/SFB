@@ -1,6 +1,6 @@
 /**
  * SFB Firmware
- * Copyright (C) 2019 Technik Gegg
+ * Copyright (C) 2019-2021 Technik Gegg
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,30 +17,54 @@
  *
  */
 
+/*
+ Uncomment the  following line to compile for a Arduino PRO MICRO (LEONARDO).
+
+ Be aware, that platformIO has issues with programming such devices!
+ Hence, you have to copy the source file as "Smart-Filament-Buffer.ino" into an
+ separate folder named "Smart-Filament-Buffer", copy the SFB.h into it as well
+ and compile and upload this firmware using the Arduino IDE!
+*/
+//#define ARDUINO_PRO_MICRO 1   
+
 #include <U8g2lib.h>
 #include <EEPROM.h>
 #include <Wire.h>
 #include "SFB.h"
-
 
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R1, /* reset=*/ U8X8_PIN_NONE);
 
 
 bool          runout[MAX_SENSOR];       // state storage for run-out detection
 int           runoutTime;               // timer value for latest run-out detected
-int           sensorsIn[MAX_SENSOR] = { 
-                  A6, A3, A2, A1, A0    // sensor inputs for T0..T4
+uint8_t       sensorsIn[MAX_SENSOR] = { 
+                  A0, A1, A2, A3, A6    // sensor inputs for T0..T4
               };
-byte          runoutTrigger;            // time in seconds to trigger runout on the controller board
-int           gaussMin;                 // Gauss values min./max. for "filament runout" detection
+byte          runoutTrigger;            // time in seconds to trigger run-out on the controller board
+int           gaussMin;                 // Gauss values min./max. for "filament run-out" detection
 int           gaussMax;
-volatile int  screenSaver;              // counter for screen saver
+int           screenSaver;              // counter for screen saver
 volatile bool isPowerSave;              // screen saver ON flag 
 bool          showMenu;                 // show menu flag
 bool          lastTriggerState;         // last filament state
 bool          isInit = true;            // flag for displaying params at start
-char          buf[60];                  // generic buffer
-volatile int  seconds;                  // seconds counter
+int           seconds;                  // seconds counter
+int8_t        tool = -1;                // current tool to monitor (-1 means all tools)
+
+void setFont() {
+  display.setFont(u8g2_font_9x15_tf);   // set default font
+}
+
+void setFont11() {
+  display.setFont(u8g2_font_profont11_tr);  // set smaller font
+}
+
+int getAnalogValue(uint8_t port) {
+  int val = analogRead(port);
+  val &= 0x3FC;   // map out lower 2 bits
+  long gauss = map(val, 0, 1023, -640, 640);
+  return (int) gauss;
+}
 
 void showMainMenu() {
 
@@ -48,11 +72,13 @@ void showMainMenu() {
   unsigned  startTime = millis();
   uint8_t   current_selection = 0;
   char      caption[40];
+  char      buf[50];
   
-  display.setFont(u8g2_font_unifont_t_symbols);
+  setFont();
   sprintf_P(caption, PSTR("Options"));
 
   do {
+    // debounce Menu input
     while(digitalRead(MENU_PIN) == LOW)
       ;
     sprintf_P(buf, PSTR("Trigger\nSensors\n---\nDefaults\n---\nEXIT"));
@@ -90,14 +116,23 @@ void showMainMenu() {
   isPowerSave = false;
 }
 
+/*
+  Shows the raw values of each sensor.
+  Menu button leaves this mode.
+  Next button starts sampling for the highest value (gaussMin), which is used as run-out trigger value.
+  Prev button stores the gaussMin in EEPROM.
+*/
 void showSensors() {
-  display.setFont(u8g2_font_unifont_t_symbols);
+  setFont();
   display.setFontPosTop();
 
   bool stopMenu = false;
   bool isSampling = false;
   int x, y, samples = 0;
   int maxGauss;
+  int minGauss;
+  char buf[25];
+  
   while(digitalRead(MENU_PIN) == LOW)
     ;
 
@@ -106,42 +141,49 @@ void showSensors() {
     if(digitalRead(NEXT_PIN) == LOW && !isSampling) {
       isSampling = true;
       samples = 0;
-      maxGauss = 0;
+      minGauss = gaussMin;
+      maxGauss = gaussMax;
     }
     if(digitalRead(PREV_PIN) == LOW && !isSampling && maxGauss != 0) {
-      EEPROM.put(EPR_SENSMIN_ADR, -maxGauss);
+      EEPROM.put(EPR_SENSMIN_ADR, minGauss);
       EEPROM.put(EPR_SENSMAX_ADR, maxGauss);
+      gaussMin = minGauss;
+      gaussMax = maxGauss;
       sprintf_P(buf,PSTR("STORED!"));
       drawSamplingStat(buf);
       samples = 0;
     }
     
-    for(int i=0; i< MAX_SENSOR; i++) {
-      int gauss = map(analogRead(sensorsIn[i]), 0, 1023, -640, 640);
+    for(int8_t i=0; i< MAX_SENSOR; i++) {
+      int gauss = getAnalogValue(sensorsIn[i]);
       if(isSampling) {
-        if(abs(gauss) > maxGauss)
-          maxGauss = (int)((float)(abs(gauss)/10+1) * 10);
+        if(samples < MAX_SAMPLES) {
+          if(abs(gauss) > minGauss)
+            minGauss = (int)((float)(abs(gauss)/10+1) * 10);
+        }
       }
       y = i*20+12; x = 5;
       sprintf_P(buf,PSTR("T%d"), i);
       display.setCursor(x, y); display.print(buf);
       sprintf_P(buf, PSTR("%4d"), gauss);
-      display.setCursor(x+25, y); display.print(buf);
+      display.setCursor(x+22, y); display.print(buf);
+      delay(25);
     }
     if(isSampling) {
-      sprintf_P(buf,PSTR("SAMPLING..."));
+      if(samples < MAX_SAMPLES)
+        sprintf_P(buf,PSTR("SAMPLE MIN"));
       drawSamplingStat(buf);
       samples++;
     }
-    if(samples > 20) {
-      isSampling = false;
-      if(maxGauss > 0) {
-        sprintf_P(buf,PSTR("%3d/%3d"),-maxGauss, maxGauss);
+    if(samples >= MAX_SAMPLES) {
+      if(minGauss > 0) {
+        sprintf_P(buf,PSTR("%3d/%3d"), minGauss, maxGauss);
         drawSamplingStat(buf);
       }
+      isSampling = false;
     }
     display.sendBuffer();
-    delay(500);
+    delay(100);
     if(digitalRead(MENU_PIN) == LOW)
       stopMenu = true;
   } while(!stopMenu);
@@ -150,7 +192,8 @@ void showSensors() {
 
 void showTriggerMenu() {
 
-  char caption[40];
+  char caption[20];
+  char buf[36];
   sprintf_P(caption, PSTR("Trigger"));
   uint8_t current_selection;
   bool stopMenu = false;
@@ -165,8 +208,8 @@ void showTriggerMenu() {
     default:  current_selection = 0; break; 
   }
   do {
-    display.setFont(u8g2_font_unifont_t_symbols);
-    sprintf_P(buf, PSTR("15 s\n30 s\n45 s\n60 s\n90 s\n120 s\nEXIT"));
+    setFont();
+    sprintf_P(buf, PSTR("15s\n30s\n45s\n60s\n90s\n120s\nEXIT"));
     current_selection = display.userInterfaceSelectionList(caption, current_selection, buf);
 
     switch(current_selection) {
@@ -200,7 +243,6 @@ void showTriggerMenu() {
     }
     if(current_selection >= 1 && current_selection <=6) {
       EEPROM.update(EPR_TRIGGER_ADR, runoutTrigger);
-      reboot();
     }
   } while(!stopMenu);
 }
@@ -213,70 +255,96 @@ void reboot() {
 }
 
 void drawSamplingStat(char* buf) {
-  display.setFont(u8g2_font_profont10_tf);
+  setFont11();
   int y = display.getDisplayHeight()-10;
   display.setDrawColor(0);
-  display.drawBox(0, y-2, display.getDisplayWidth(), display.getDisplayHeight()-y-2);
+  display.drawBox(0, y-2, display.getDisplayWidth(), display.getDisplayHeight()-y-1);
   display.setDrawColor(1);
   int x = display.getDisplayWidth() - display.getStrWidth(buf) - 2;
   display.setCursor(x, y); display.print(buf);
-  display.setFont(u8g2_font_unifont_t_symbols);
+  setFont();
+}
+
+void showParams() {
+  int x, y;
+  char buf[30];
+  // this can be interrupted by either Next or Prev buttons
+  if(digitalRead(PREV_PIN) == LOW || digitalRead(NEXT_PIN) == LOW) {
+    isInit = false;
+    return;
+  }
+  y = 10; x = 5;
+  setFont11();
+  display.setCursor(x, y); display.print(F("*Smart-FB*"));  y+= 26;
+  display.setCursor(x, y); display.print(F("Timeout"));     y+= 16;
+  sprintf_P (buf, PSTR("%8d s"), runoutTrigger);
+  display.setCursor(x, y); display.print(buf);              y+= 16;
+  display.setCursor(x, y); display.print(F("Sensor MIN"));  y+= 16;
+  sprintf_P (buf, PSTR("%7d Gs"), gaussMin);
+  display.setCursor(x, y); display.print(buf);              y+= 16;
+  display.setCursor(x, y); display.print(F("Sensor MAX"));  y+= 16;
+  sprintf_P (buf, PSTR("%7d Gs"), gaussMax);
+  display.setCursor(x, y); display.print(buf);
 }
 
 void draw() {
   int x, y;
+  char buf[30];
 
   if(isPowerSave)
     return;
 
-  if(seconds < 10 && isInit) {
-    if(digitalRead(PREV_PIN) == LOW || digitalRead(NEXT_PIN) == LOW) {
-      isInit = false;
-      return;
-    }
-    y = 10; x = 5;
-    display.setFont(u8g2_font_profont11_tf);
-    display.setCursor(x, y); display.print(F("*Smart-FB*"));  y+= 26;
-    display.setCursor(x, y); display.print(F("Timeout"));     y+= 16;
-    sprintf_P (buf, PSTR("%8d s"), runoutTrigger);
-    display.setCursor(x, y); display.print(buf);              y+= 16;
-    display.setCursor(x, y); display.print(F("Sensor MIN"));  y+= 16;
-    sprintf_P (buf, PSTR("%7d Gs"), gaussMin);
-    display.setCursor(x, y); display.print(buf);              y+= 16;
-    display.setCursor(x, y); display.print(F("Sensor MAX"));  y+= 16;
-    sprintf_P (buf, PSTR("%7d Gs"), gaussMax);
-    display.setCursor(x, y); display.print(buf);
+  // show parameters set in EEPROM after startup for 5 seconds
+  if(seconds < 5 && isInit) {
+    showParams();
     return;
   }
   else {
     isInit = false;
   }
-  display.setFont(u8g2_font_unifont_t_symbols);
+  setFont();
   display.setFontPosTop();
 
-  for(int i=0; i< MAX_SENSOR; i++) {
+  for(int8_t i=0; i< MAX_SENSOR; i++) {
+    // draw tool (sensor) number
     y = i*20+12; x = 5;
     sprintf_P(buf, PSTR("T%d"), i);
     display.setCursor(x, y); display.print(buf);
-    if(i%2 == 0)
-      x = 34;
-    else 
-      x = 48;
-    y = i*20+20;
-    display.drawUTF8(x, y, runout[i] == true ? "\u25cb" : "\u25cf");
+    // draw status of filament presence
+    x = (i % 2 == 0) ? 40 : 58;
+    y = i*20+18;
+    if(tool == -1) {
+      if(!runout[i])
+        display.drawDisc(x, y, 5, U8G2_DRAW_ALL);
+      else
+        display.drawCircle(x, y, 5, U8G2_DRAW_ALL);
+    }
+    else if(tool == i) {
+      if(!runout[i])
+        display.drawDisc(x, y, 5, U8G2_DRAW_ALL);
+      else
+        display.drawCircle(x, y, 5, U8G2_DRAW_ALL);
+    }
+    else {
+      // not the currently monitored tool, then don't show status of this sensor at all
+      display.setDrawColor(0);
+      display.drawBox(x, y, 10, 10);
+      display.setDrawColor(1);
+    }
   }
-  y += 16;
-  display.setFont(u8g2_font_profont10_tf);
+  y += 18;
+  // draw run-out if detected
+  setFont11();
   if(runoutTime > 0) {
-    if(runoutTrigger - (seconds - runoutTime) < 0)
-      sprintf_P(buf, PSTR("No filament"));
+    if(runoutTrigger - (seconds - runoutTime) <= 0)
+      sprintf_P(buf, PSTR("RUNOUT"));
     else
-      sprintf_P(buf, PSTR("%d"), runoutTrigger - (seconds - runoutTime));
+      sprintf_P(buf, PSTR("T-%d"), runoutTrigger - (seconds - runoutTime));
   }
   else {
     sprintf_P(buf, PSTR(" "));
     display.setDrawColor(0);
-    display.drawBox(0, y-2, display.getDisplayWidth(), display.getDisplayHeight()-y-2);
+    display.drawBox(0, y-1, display.getDisplayWidth(), display.getDisplayHeight()-y-1);
     display.setDrawColor(1);
   }
   x = display.getDisplayWidth() - display.getStrWidth(buf) -2;
@@ -284,28 +352,36 @@ void draw() {
 }
 
 void readSensors() {
-  //Serial.print(gaussMin); Serial.print(F(", "));    // uncomment this to draw sensor values on Serial Plotter
-  for(int i=0; i< MAX_SENSOR; i++) {
+  
+  for(int8_t i=0; i< MAX_SENSOR; i++) {
     runout[i] = true;
-    int gauss = map(analogRead(sensorsIn[i]), 0, 1023, -640, 640);
-    if(gauss <= gaussMin || gauss >= gaussMax) {
+    int gauss = getAnalogValue(sensorsIn[i]);
+    if(gauss >= (gaussMin * 1.75)) {
       runout[i] = false;
     }
-    delay(10);
-    //Serial.print(gauss); Serial.print(F(","));      // uncomment this to draw sensor values on Serial Plotter
+    delay(2);
   }
-  //Serial.println(gaussMax);                         // uncomment this to draw sensor values on Serial Plotter
+  
   int runoutCnt = 0;
-  for(int i=0; i< MAX_SENSOR; i++) {
-    if(runout[i] == true) 
-      runoutCnt++;
+  if(tool == -1) {
+    for(int8_t i=0; i< MAX_SENSOR; i++) {
+      if(runout[i] == true) {
+          runoutCnt++;
+      }
+    }
   }
-
+  else {
+    // monitoring only one sensor, check only that one
+    if(runout[tool])
+      runoutCnt = MAX_SENSOR;
+  }
+  // check if run-out has to be signalled
   if(runoutCnt == MAX_SENSOR) {
     if(runoutTime == 0)
       runoutTime = seconds;
-    if(seconds - runoutTime >= runoutTrigger)
+    if(seconds - runoutTime >= runoutTrigger) {
       signalRunout(true);
+    }
   }
   else {
     signalRunout(false);
@@ -334,7 +410,7 @@ void setDefaults() {
   sprintf_P(t2,PSTR("DEFAULTS"));
   sprintf_P(t3,PSTR("Sure?"));
   sprintf_P(btn,PSTR(" Yes \n NO "));
-  display.setFont(u8g2_font_profont11_tf);
+  setFont11();
   display.clearDisplay();
 
   if(display.userInterfaceMessage(t1, t2, t3, btn)!=1) {
@@ -380,17 +456,63 @@ void menuInterrupt() {
     showMenu = true;  
 }
 
+void handleSerial(String& in) {
+  // Serial.print("[IN]\t"); Serial.println(in);
+  if(in.charAt(0) == 'T') {
+    // either set or query active tool
+    if(in.charAt(1) != '?') {
+      long t = in.substring(1).toInt();
+      if(t >= -1 && t < MAX_SENSOR)
+        tool = (int8_t)t;
+    }
+    Serial.println(tool);
+  }
+  else if(in.charAt(0) == 'N') {
+    // either set or query Gauss Min value
+    if(in.charAt(1) == '?') {
+      Serial.print(F("Gauss Min.: "));
+      Serial.println(gaussMin);
+    }  
+    else {
+      long g = in.substring(1).toInt();
+      if(g >= DEFAULT_SENSMIN)
+        gaussMin = (int)g;      
+      EEPROM.put(EPR_SENSMIN_ADR, gaussMin);
+    }
+  }
+  else if(in.charAt(0) == 'X') {
+    // either set or query Gauss Max value
+    if(in.charAt(1) == '?') {
+      Serial.print(F("Gauss Max.: "));
+      Serial.println(gaussMax);
+    }  
+    else {
+      long g = in.substring(1).toInt();
+      if(g < DEFAULT_SENSMAX)
+        gaussMax = (int)g;      
+      EEPROM.put(EPR_SENSMAX_ADR, gaussMax);
+    }
+  }
+}
+
+void serialEvent() {
+  String in = Serial.readString();
+  in.toUpperCase();
+  handleSerial(in);
+}
+
 void setup() {
-  Serial.begin(57600);
+  Serial.begin(SERIAL_BAUDRATE);
 
   pinMode(MENU_PIN, INPUT_PULLUP);
   pinMode(NEXT_PIN, INPUT_PULLUP);
   pinMode(PREV_PIN, INPUT_PULLUP);
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
   pinMode(TRIGGER_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
   digitalWrite(TRIGGER_PIN, LOW);
-  for(int i=0; i< MAX_SENSOR; i++) {
+  
+  for(int8_t i=0; i< MAX_SENSOR; i++) {
     pinMode(sensorsIn[i], INPUT);
   }
   
@@ -408,17 +530,15 @@ void setup() {
   }
   else
     runoutTrigger = val;
-  int val1;
-  EEPROM.get(EPR_SENSMIN_ADR, val1);
-  gaussMin = val1;
-  EEPROM.get(EPR_SENSMAX_ADR, val1);
-  gaussMax = val1;
+  EEPROM.get(EPR_SENSMIN_ADR, gaussMin);
+  EEPROM.get(EPR_SENSMAX_ADR, gaussMax);
 }
 
 void loop() {
-   while(digitalRead(MENU_PIN) == LOW)
-    delay(10);
 
+  if(Serial.available()) {
+    serialEvent();
+  }
   if(showMenu) {
     if(!isInit)
       showMainMenu();
