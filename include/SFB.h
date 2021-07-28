@@ -34,7 +34,7 @@
 #define MENU_PIN        7           // MENU button pin
 #define PREV_PIN        9           // PREV button pin 
 #else
-#define TRIGGER_PIN     13          // output pin for triggering filament runout
+#define TRIGGER_PIN     9           // output pin for triggering filament runout (changed from 13 in previous version)
 #define NEXT_PIN        11          // NEXT button pin
 #define MENU_PIN        2           // MENU button pin
 #define PREV_PIN        10          // PREV button pin 
