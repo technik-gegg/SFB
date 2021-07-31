@@ -23,6 +23,6 @@ Via the integrated menu, you'll be able to configure the timeout timespan (15 to
 Also, the trigger threshold can be monitored and sampled via the menu interface. Usually, the default values ought to be be in the range of +-50 Gauss. Any value below or above this threshold is being recognized as "loaded".
 
 [1]: https://www.thingiverse.com/thing:3709082
-[2]: https://github.com/technik-gegg/SFB/blob/master/schematic/Schematik.png
+[2]: https://github.com/technik-gegg/SFB/blob/master/Schematics/SFB.pdf
 
 
