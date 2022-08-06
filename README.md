@@ -9,7 +9,12 @@ The schematics for this project are pretty straight forward:
 
 ![Schematic](Schematics/SFB/Schematic.jpg)
 
-All the electronic parts will fit on a standard 60 x 40 mm prototype board.
+All the electronics will fit on a standard 60 x 40 mm prototype board.
+
+If you don't feel like wiring all this up on a prototype board, head over to my [PCB repository at AISLER](https://aisler.net/technik-gegg/smuff/sfb-pcb)), where you can order a PCB right away. Usually, you'll get your PCB made and delivered within 7 (work) days.
+
+[![PCB-AISLER](/Schematics/SFB/PCB-AISLER.jpg)](https://aisler.net/technik-gegg/smuff/sfb-pcb)
+
 There are 3 push buttons used to handle the integrated menus. J1 gets connected to your 3D printer and will take a 5V and GND power input on pins 1 and 2, pin 3 will be set to HIGH as soon as a run-out has been detected. Configured correctly, this signal will cause your 3D Printer to pause the print before it runs out of filament.
 
 On a Duet3D controller board you'll need these two lines of GCode in your config.g:
