@@ -50,17 +50,18 @@
 #define DEFAULT_SENSMIN 50
 #define DEFAULT_SENSMAX 500
 
-void showTriggerMenu();
-void showSensors();
-void setDefaults();
-void setupTimer();
-void signalRunout(bool);
-void draw();
-void drawSamplingStat(char*);
-void menuInterrupt();
-void readSensors();
-void reboot();
-void setFont();
-void setFont11();
-void showParams();
-int  getAnalogValue(uint8_t port);
+void    showTriggerMenu();
+void    showSensors();
+void    setDefaults();
+void    setupTimer();
+void    signalRunout(bool);
+void    draw();
+void    drawSamplingStat(char*);
+void    menuInterrupt();
+void    readSensors();
+void    reboot();
+void    setFont();
+void    setFont11();
+void    showParams();
+int     getAnalogValue(uint8_t port);
+uint8_t scanI2C();

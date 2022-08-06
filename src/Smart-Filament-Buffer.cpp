@@ -32,7 +32,7 @@
 #include <Wire.h>
 #include "SFB.h"
 
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R1, /* reset=*/ U8X8_PIN_NONE);
+U8G2_SSD1306_128X64_NONAME_2_HW_I2C display(U8G2_R1, /* reset=*/ U8X8_PIN_NONE);
 
 
 bool          runout[MAX_SENSOR];       // state storage for run-out detection
@@ -61,10 +61,26 @@ void setFont11() {
 
 int getAnalogValue(uint8_t port) {
   int val = analogRead(port);
-  val &= 0x3FC;   // map out lower 2 bits
+  val &= 0x3F8;   // map out lower 3 bits
   long gauss = map(val, 0, 1023, -640, 640);
   return (int) gauss;
 }
+
+
+uint8_t scanI2C() {
+  uint8_t cnt = 0;
+  Wire.begin();
+  for (uint8_t address = 1; address < 127; address++)
+  {
+    Wire.beginTransmission(address);
+    if (Wire.endTransmission() == 0) {
+      Serial.print(PSTR("I2C device found at address 0x")); Serial.println(address, HEX);
+    }
+    delay(3);
+  }
+  return cnt;
+}
+
 
 void showMainMenu() {
 
@@ -137,7 +153,6 @@ void showSensors() {
     ;
 
   do {
-    display.clearBuffer();
     if(digitalRead(NEXT_PIN) == LOW && !isSampling) {
       isSampling = true;
       samples = 0;
@@ -153,37 +168,39 @@ void showSensors() {
       drawSamplingStat(buf);
       samples = 0;
     }
-    
-    for(int8_t i=0; i< MAX_SENSOR; i++) {
-      int gauss = getAnalogValue(sensorsIn[i]);
-      if(isSampling) {
-        if(samples < MAX_SAMPLES) {
-          if(abs(gauss) > minGauss)
-            minGauss = (int)((float)(abs(gauss)/10+1) * 10);
+    display.firstPage();
+    do {
+      for(int8_t i=0; i< MAX_SENSOR; i++) {
+        int gauss = getAnalogValue(sensorsIn[i]);
+        if(isSampling) {
+          if(samples < MAX_SAMPLES) {
+            if(abs(gauss) > minGauss)
+              minGauss = (int)((float)(abs(gauss)/10+1) * 10);
+          }
         }
+        y = i*20+12; x = 5;
+        sprintf_P(buf,PSTR("T%d"), i);
+        display.setCursor(x, y); display.print(buf);
+        sprintf_P(buf, PSTR("%4d"), gauss);
+        display.setCursor(x+22, y); display.print(buf);
+        delay(25);
       }
-      y = i*20+12; x = 5;
-      sprintf_P(buf,PSTR("T%d"), i);
-      display.setCursor(x, y); display.print(buf);
-      sprintf_P(buf, PSTR("%4d"), gauss);
-      display.setCursor(x+22, y); display.print(buf);
-      delay(25);
-    }
-    if(isSampling) {
-      if(samples < MAX_SAMPLES)
-        sprintf_P(buf,PSTR("SAMPLE MIN"));
-      drawSamplingStat(buf);
-      samples++;
-    }
-    if(samples >= MAX_SAMPLES) {
-      if(minGauss > 0) {
-        sprintf_P(buf,PSTR("%3d/%3d"), minGauss, maxGauss);
+      if(isSampling) {
+        if(samples < MAX_SAMPLES)
+          sprintf_P(buf,PSTR("SAMPLE MIN"));
         drawSamplingStat(buf);
+        samples++;
       }
-      isSampling = false;
-    }
-    display.sendBuffer();
-    delay(100);
+      if(samples >= MAX_SAMPLES) {
+        if(minGauss > 0) {
+          sprintf_P(buf,PSTR("%3d/%3d"), minGauss, maxGauss);
+          drawSamplingStat(buf);
+        }
+        isSampling = false;
+      }
+    } while (display.nextPage());
+    
+    delay(10);
     if(digitalRead(MENU_PIN) == LOW)
       stopMenu = true;
   } while(!stopMenu);
@@ -243,13 +260,13 @@ void showTriggerMenu() {
     }
     if(current_selection >= 1 && current_selection <=6) {
       EEPROM.update(EPR_TRIGGER_ADR, runoutTrigger);
+      stopMenu = true;
     }
   } while(!stopMenu);
 }
 
 void reboot() {
   display.clearDisplay();
-  display.clearBuffer();
   delay(500);
   asm volatile ("jmp 0");
 }
@@ -489,7 +506,7 @@ void handleSerial(String& in) {
     else {
       long g = in.substring(1).toInt();
       if(g < DEFAULT_SENSMAX)
-        gaussMax = (int)g;      
+        gaussMax = (int)g;
       EEPROM.put(EPR_SENSMAX_ADR, gaussMax);
     }
   }
@@ -504,6 +521,9 @@ void serialEvent() {
 void setup() {
   Serial.begin(SERIAL_BAUDRATE);
 
+  scanI2C();
+  Serial.println(PSTR("I2C Scan complete"));
+
   pinMode(MENU_PIN, INPUT_PULLUP);
   pinMode(NEXT_PIN, INPUT_PULLUP);
   pinMode(PREV_PIN, INPUT_PULLUP);
@@ -515,23 +535,32 @@ void setup() {
   for(int8_t i=0; i< MAX_SENSOR; i++) {
     pinMode(sensorsIn[i], INPUT);
   }
+  Serial.println(PSTR("Pins initialized"));
   
   display.begin(/*Select=*/ MENU_PIN,  /* menu_next_pin= */ NEXT_PIN, /* menu_prev_pin= */ PREV_PIN, /* menu_up_pin= */ U8X8_PIN_NONE, /* menu_down_pin= */ U8X8_PIN_NONE, /* menu_home_pin= */ U8X8_PIN_NONE);
   attachInterrupt(digitalPinToInterrupt(MENU_PIN), menuInterrupt, FALLING);
+  Serial.println(PSTR("Display initialized"));
   setupTimer();
+  Serial.println(PSTR("Timer initialized"));
   
   screenSaver = 0;
   isPowerSave = false;
   signalRunout(true);
+  Serial.println(PSTR("Runout initialized"));
   
+  Serial.println(PSTR("Reading EEPROM"));
   byte val = EEPROM.read(EPR_TRIGGER_ADR);
   if(val == 0xFF) {
+    Serial.println(PSTR("Resetting to defaults"));
     setDefaults();
   }
   else
     runoutTrigger = val;
+  // Serial.println(PSTR("Getting Gauss min."));
   EEPROM.get(EPR_SENSMIN_ADR, gaussMin);
+  // Serial.println(PSTR("Getting Gauss max."));
   EEPROM.get(EPR_SENSMAX_ADR, gaussMax);
+  Serial.println(PSTR("Setup done"));
 }
 
 void loop() {
@@ -546,9 +575,10 @@ void loop() {
   else {
     display.setPowerSave(isPowerSave ? 1 : 0);
     readSensors();
-    display.clearBuffer();
-    draw();
-    display.sendBuffer();
+    display.firstPage();
+    do {
+      draw();
+    } while(display.nextPage());
   }
   delay(LOOP_DELAY);
   if(seconds - screenSaver >= SCREEN_TIMEOUT) {

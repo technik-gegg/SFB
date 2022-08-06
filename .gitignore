@@ -7,4 +7,11 @@ src/Smart-Filament-Buffer/
 *.bak
 *.sch-bak
 *.bck
+*.zip
+*.gbr
+*.drl
+*.xml
+_autosave*
 fp-info-cache
+SFB/Gerber/
+
