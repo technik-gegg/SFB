@@ -19,9 +19,12 @@
 
 #pragma once
 
-#define EPR_TRIGGER_ADR 1
-#define EPR_SENSMIN_ADR 2
-#define EPR_SENSMAX_ADR 4
+#define EEP_TRIGGER_ADR 1
+#define EEP_SENSMIN_ADR 2
+#define EEP_SENSMAX_ADR 4
+#define EEP_DEVICE_ADR  6
+#define EEP_DEVMODE_ADR 8
+#define EEP_DEVLAST_ADR 10
 
 #define SERIAL_BAUDRATE 115200      // Baudrate for serial communication
 
@@ -30,29 +33,38 @@
 
 #if defined(ARDUINO_PRO_MICRO)
 #define TRIGGER_PIN     6           // output pin for triggering filament runout
+#define TRIGGERIN_PIN   5           // input pin for triggering filament runout (for daisy-chain)
 #define NEXT_PIN        8           // NEXT button pin
 #define MENU_PIN        7           // MENU button pin
 #define PREV_PIN        9           // PREV button pin 
+#define LED_PIN         0           // no builtin LED
 #else
 #define TRIGGER_PIN     9           // output pin for triggering filament runout (changed from 13 in previous version)
+#define TRIGGERIN_PIN   8           // input pin for triggering filament runout (for daisy-chain)
 #define NEXT_PIN        11          // NEXT button pin
 #define MENU_PIN        2           // MENU button pin
 #define PREV_PIN        10          // PREV button pin 
+#define LED_PIN         LED_BUILTIN // integrated LED pin
 #endif
 
-#define LED_PIN         LED_BUILTIN // integrated LED pin
 #define LOOP_DELAY      10          // delay for loop()
 #define SCREEN_TIMEOUT  60*3        // turn screen off after 3 minutes to avoid OLED burn-in
 #define MENU_TIMEOUT    10000
+#define INFO_TIMEOUT    7           // timeout for settings summary after startup (in seconds)
 #define PRESCALER       256
 #define SECOND_COUNTER  65536 - (F_CPU/PRESCALER) // usually 3036
-#define DEFAULT_TRIGGER 150
+#define DEFAULT_TRIGGER 120
 #define DEFAULT_SENSMIN 50
 #define DEFAULT_SENSMAX 500
 
+#define ArraySize(arr) (sizeof(arr) / sizeof(arr[0]))
+
 void    showTriggerMenu();
 void    showSensors();
+void    showDeviceMenu();
+void    showModeMenu();
 void    setDefaults();
+bool    setChained();
 void    setupTimer();
 void    signalRunout(bool);
 void    draw();
@@ -60,8 +72,9 @@ void    drawSamplingStat(char*);
 void    menuInterrupt();
 void    readSensors();
 void    reboot();
-void    setFont();
-void    setFont11();
+void    setFontBig();
+void    setFontSmall();
 void    showParams();
 int     getAnalogValue(uint8_t port);
 uint8_t scanI2C();
+void    resetScreenSaver();
