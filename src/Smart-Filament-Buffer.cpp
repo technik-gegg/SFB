@@ -27,10 +27,9 @@
 */
 //#define ARDUINO_PRO_MICRO 1   
 
-#include <U8g2lib.h>
+#include "SFB.h"
 #include <EEPROM.h>
 #include <Wire.h>
-#include "SFB.h"
 
 U8G2_SSD1306_128X64_NONAME_2_HW_I2C display(U8G2_R1, /* reset=*/ U8X8_PIN_NONE);
 
@@ -55,6 +54,7 @@ int8_t        lastDevice = 0;           // 1 for last device in a daisy-chain
 int8_t        deviceMode = 0;           // device mode (0=standalone, 1=daisy-chain)
 bool          deviceRunout = false;     // set if the local device has triggered runout in Daisy-Chain mode
 bool          triggerIn = false;        // input trigger coming from next device
+bool          txDisabled = false;       // set if TX is being disabled (sending text isn't possible anymore)
 
 void setFontBig() {
   display.setFont(u8g2_font_9x15_tf);   // set default font
@@ -86,7 +86,7 @@ uint8_t scanI2C() {
   {
     Wire.beginTransmission(address);
     if (Wire.endTransmission() == 0) {
-      Serial.print(PSTR("I2C device found at address 0x")); Serial.println(address, HEX);
+      __log(PSTR("I2C device found at address 0x%x"), address);
     }
     delay(3);
   }
@@ -561,7 +561,6 @@ void readSensors() {
         // runout signal from next device in chain is set
         // don't start a countdown, signal runout right away
         runoutTime = seconds - runoutTrigger;
-        Serial.println(runoutTime);
         signalRunout(true);
         return;
       }
@@ -670,7 +669,7 @@ void menuInterrupt() {
 }
 
 void handleSerial(String& in) {
-  // Serial.print("[IN]\t"); Serial.println(in);
+  // __log(PSTR("[IN]\t %s"), in.c_str());
   if(in.charAt(0) == 'T') {
     // either set or query active tool
     if(in.charAt(1) != '?') {
@@ -678,13 +677,12 @@ void handleSerial(String& in) {
       if(t >= -1 && t < MAX_SENSOR)
         tool = (int8_t)t;
     }
-    Serial.println(tool);
+    __log(PSTR("T%d"), tool);
   }
   else if(in.charAt(0) == 'N') {
     // either set or query Gauss Min value
     if(in.charAt(1) == '?') {
-      Serial.print(F("Gauss Min.: "));
-      Serial.println(gaussMin);
+      __log(PSTR("Gauss Min.: %d"), gaussMin);
     }  
     else {
       long g = in.substring(1).toInt();
@@ -696,8 +694,7 @@ void handleSerial(String& in) {
   else if(in.charAt(0) == 'X') {
     // either set or query Gauss Max value
     if(in.charAt(1) == '?') {
-      Serial.print(F("Gauss Max.: "));
-      Serial.println(gaussMax);
+      __log(PSTR("Gauss Max.: %d"), gaussMax);
     }  
     else {
       long g = in.substring(1).toInt();
@@ -714,17 +711,28 @@ void serialEvent() {
   handleSerial(in);
 }
 
+void __log(const char *fmt, ...) {
+  if(txDisabled)
+    return;
+  
+  char _log[256];
+  va_list arguments;
+  va_start(arguments, fmt);
+  vsnprintf_P(_log, ArraySize(_log) - 1, fmt, arguments);
+  va_end(arguments);
+  Serial.println(_log);
+}
+
 void setup() {
   Serial.begin(SERIAL_BAUDRATE);
 
   scanI2C();
-  Serial.println(PSTR("I2C Scan complete"));
+  __log(PSTR("I2C Scan complete"));
 
   pinMode(MENU_PIN, INPUT_PULLUP);
   pinMode(NEXT_PIN, INPUT_PULLUP);
   pinMode(PREV_PIN, INPUT_PULLUP);
   pinMode(TRIGGER_PIN, OUTPUT);
-  pinMode(TRIGGERIN_PIN, INPUT);
   if(LED_PIN != 0) {
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
@@ -734,43 +742,47 @@ void setup() {
   for(int8_t i=0; i< MAX_SENSOR; i++) {
     pinMode(sensorsIn[i], INPUT);
   }
-  Serial.println(PSTR("Pins initialized"));
+  __log(PSTR("Pins initialized"));
   
   display.begin(/*Select=*/ MENU_PIN,  /* menu_next_pin= */ NEXT_PIN, /* menu_prev_pin= */ PREV_PIN, /* menu_up_pin= */ U8X8_PIN_NONE, /* menu_down_pin= */ U8X8_PIN_NONE, /* menu_home_pin= */ U8X8_PIN_NONE);
   attachInterrupt(digitalPinToInterrupt(MENU_PIN), menuInterrupt, FALLING);
-  Serial.println(PSTR("Display initialized"));
+  __log(PSTR("Display initialized"));
   setupTimer();
-  Serial.println(PSTR("Timer initialized"));
+  __log(PSTR("Timer initialized"));
   
   resetScreenSaver();
   signalRunout(false);
-  Serial.println(PSTR("Runout initialized"));
+  __log(PSTR("Runout initialized"));
   
-  Serial.println(PSTR("Reading EEPROM"));
+  __log(PSTR("Reading EEPROM"));
   byte val = EEPROM.read(EEP_TRIGGER_ADR);
   if(val == 0xFF) {
-    Serial.println(PSTR("Resetting to defaults"));
+    __log(PSTR("Resetting to defaults"));
     setDefaults();
   }
   else
     runoutTrigger = val;
-  // Serial.println(PSTR("Getting Gauss min."));
   EEPROM.get(EEP_SENSMIN_ADR, gaussMin);
-  // Serial.println(PSTR("Getting Gauss max."));
   EEPROM.get(EEP_SENSMAX_ADR, gaussMax);
-  // Serial.println(PSTR("Getting device mode"));
   EEPROM.get(EEP_DEVMODE_ADR, deviceMode);
   if(deviceMode == 0xFF)
-    device = 0;
-  // Serial.println(PSTR("Getting device"));
+    deviceMode = 0;
   EEPROM.get(EEP_DEVICE_ADR, device);
   if(device == 0xFF)
     device = 0;
-  // Serial.println(PSTR("Getting last device"));
   EEPROM.get(EEP_DEVLAST_ADR, lastDevice);
   if(lastDevice == 0xFF)
     lastDevice = 0;
-  Serial.println(PSTR("Setup done"));
+  // in Daisy-Chain mode TX pin becomes the SIG input pin
+  // hence sending text to serial becomes unavailable
+  if(deviceMode != 0) {
+    __log(PSTR("Disabling TX pin"));
+    txDisabled = false;
+    UCSR0B &= ~bit (TXEN0);   // disable TX pin to be used as trigger input 
+    pinMode(TRIGGERIN_PIN, INPUT);
+  }
+
+  __log(PSTR("Setup done"));
 }
 
 void loop() {

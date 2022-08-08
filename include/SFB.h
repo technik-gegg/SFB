@@ -19,6 +19,10 @@
 
 #pragma once
 
+#include <Arduino.h>
+#include <U8g2lib.h>
+
+
 #define EEP_TRIGGER_ADR 1
 #define EEP_SENSMIN_ADR 2
 #define EEP_SENSMAX_ADR 4
@@ -33,14 +37,14 @@
 
 #if defined(ARDUINO_PRO_MICRO)
 #define TRIGGER_PIN     6           // output pin for triggering filament runout
-#define TRIGGERIN_PIN   5           // input pin for triggering filament runout (for daisy-chain)
+#define TRIGGERIN_PIN   1           // input pin for triggering filament runout (for daisy-chain)
 #define NEXT_PIN        8           // NEXT button pin
 #define MENU_PIN        7           // MENU button pin
 #define PREV_PIN        9           // PREV button pin 
 #define LED_PIN         0           // no builtin LED
 #else
 #define TRIGGER_PIN     9           // output pin for triggering filament runout (changed from 13 in previous version)
-#define TRIGGERIN_PIN   8           // input pin for triggering filament runout (for daisy-chain)
+#define TRIGGERIN_PIN   1           // input pin for triggering filament runout (for daisy-chain)
 #define NEXT_PIN        11          // NEXT button pin
 #define MENU_PIN        2           // MENU button pin
 #define PREV_PIN        10          // PREV button pin 
@@ -78,3 +82,5 @@ void    showParams();
 int     getAnalogValue(uint8_t port);
 uint8_t scanI2C();
 void    resetScreenSaver();
+void    __log(const char *fmt, ...);
+
