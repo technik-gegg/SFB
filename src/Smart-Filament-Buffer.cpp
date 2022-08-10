@@ -1,6 +1,6 @@
 /**
  * SFB Firmware
- * Copyright (C) 2019-2021 Technik Gegg
+ * Copyright (C) 2019-2022 Technik Gegg
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -30,6 +30,7 @@
 #include "SFB.h"
 #include <EEPROM.h>
 #include <Wire.h>
+#include "avdweb_AnalogReadFast.h"
 
 U8G2_SSD1306_128X64_NONAME_2_HW_I2C display(U8G2_R1, /* reset=*/ U8X8_PIN_NONE);
 
@@ -55,6 +56,8 @@ int8_t        deviceMode = 0;           // device mode (0=standalone, 1=daisy-ch
 bool          deviceRunout = false;     // set if the local device has triggered runout in Daisy-Chain mode
 bool          triggerIn = false;        // input trigger coming from next device
 bool          txDisabled = false;       // set if TX is being disabled (sending text isn't possible anymore)
+int           infoTimeout = 0;          // time to hide info screen
+int8_t        rotateTools = 0;          // rotate tools on main display 0=normal, 1=90 deg, 3=270 deg.
 
 void setFontBig() {
   display.setFont(u8g2_font_9x15_tf);   // set default font
@@ -70,8 +73,8 @@ void resetScreenSaver() {
 }
 
 int getAnalogValue(uint8_t port) {
-  int val = (analogRead(port) & 0x3F8);       // map out lower 3 bits of the analog value
-  long gauss = map(val, 0, 1023, -640, 640);  // convert analog value to Gaussian value
+  int val = (analogReadFast(port) & 0x3F8);       // map out lower 3 bits of the analog value
+  long gauss = map(val, 0, 1023, MIN_GAUSS, MAX_GAUSS);  // convert analog value to Gaussian value
   return (int)gauss;
 }
 
@@ -111,7 +114,7 @@ void showMainMenu() {
       yield();
     }
     
-    snprintf_P(buf, ArraySize(buf), PSTR("Trigger\nSensors\nMode\nDevice\n---\n*Reset*\n---\nEXIT"));
+    snprintf_P(buf, ArraySize(buf), PSTR("Trigger\nSensors\nMode\nDevice\nRotate\n---\n*Reset*\n---\nEXIT"));
     current_selection = display.userInterfaceSelectionList(caption, current_selection, buf);
 
     if(current_selection == 0)
@@ -142,12 +145,22 @@ void showMainMenu() {
           startTime = millis();
           break;
 
+        case 5:
+          showRotateTools();
+          startTime = millis();
+          break;
+        
         case 6:
+        case 8:
+          startTime = millis();
+          break;
+
+        case 7:
           setDefaults();
           startTime = millis();
           break;
 
-        case 8:
+        case 9:
           stopMenu = true;
           break;
       }
@@ -172,31 +185,33 @@ void showSensors() {
 
   bool stopMenu = false;
   bool isSampling = false;
+  bool isStored = false;
   int x, y, samples = 0;
   int maxGauss;
   int minGauss;
   char buf[25];
   int  hallValues[MAX_SENSOR];
   
-  while(digitalRead(MENU_PIN) == LOW) {
-    yield();
-  }
+  debounceButtons();
+  unsigned long start = millis();
 
   do {
     if(digitalRead(NEXT_PIN) == LOW && !isSampling) {
       isSampling = true;
+      isStored = false;
       samples = 0;
-      minGauss = gaussMin;
-      maxGauss = gaussMax;
+      minGauss = MIN_GAUSS;
+      maxGauss = MAX_GAUSS;
+      start = millis();
     }
-    if(digitalRead(PREV_PIN) == LOW && !isSampling && maxGauss != 0) {
+    if(digitalRead(PREV_PIN) == LOW && !isSampling) {
       EEPROM.put(EEP_SENSMIN_ADR, minGauss);
       EEPROM.put(EEP_SENSMAX_ADR, maxGauss);
       gaussMin = minGauss;
       gaussMax = maxGauss;
-      sprintf_P(buf,PSTR("STORED!"));
-      drawSamplingStat(buf);
+      isStored = true;
       samples = 0;
+      start = millis();
     }
     for(int8_t i=0; i< MAX_SENSOR; i++) {
       int gauss = getAnalogValue(sensorsIn[i]);
@@ -212,11 +227,11 @@ void showSensors() {
     do {
       for(int8_t i=0; i< MAX_SENSOR; i++) {
         int gauss = hallValues[i];
-        y = i*20+12; x = 5;
+        y = i*21+12; x = 5;
         sprintf_P(buf,PSTR("T%d"), i+(device*MAX_SENSOR));
-        display.setCursor(x, y); display.print(buf);
+        display.drawStr(x, y, buf);
         sprintf_P(buf, PSTR("%4d"), gauss);
-        display.setCursor(x+22, y); display.print(buf);
+        display.drawStr(x+22, y, buf);
       }
       if(isSampling) {
         if(samples < MAX_SAMPLES)
@@ -224,6 +239,11 @@ void showSensors() {
         drawSamplingStat(buf);
         samples++;
       }
+      else if(isStored) {
+        sprintf_P(buf, PSTR("STORED!"));
+        drawSamplingStat(buf);
+      }
+
       if(samples >= MAX_SAMPLES) {
         if(minGauss > 0) {
           sprintf_P(buf,PSTR("%3d/%3d"), minGauss, maxGauss);
@@ -234,6 +254,8 @@ void showSensors() {
     } while (display.nextPage());
     
     if(digitalRead(MENU_PIN) == LOW)
+      stopMenu = true;
+    if(millis()-start >= SENSORS_TIMEOUT)
       stopMenu = true;
   } while(!stopMenu);
   resetScreenSaver();
@@ -393,6 +415,54 @@ void showModeMenu() {
   }
 }
 
+void showRotateTools() {
+
+  char caption[20];
+  char buf[50];
+  sprintf_P(caption, PSTR("Rotate"));
+  uint8_t current_selection = 0;
+  bool stopMenu = false;
+
+  switch(rotateTools) {
+    case 0:
+      current_selection = 1;
+      break;
+    case 1:
+      current_selection = 2;
+      break;
+    case 3:
+      current_selection = 3;
+      break;
+  }
+
+  do {
+    setFontBig();
+    snprintf_P(buf, ArraySize(buf), PSTR("0\u00b0\n90\u00b0\n270\u00b0\n---\nEXIT"));
+    current_selection = display.userInterfaceSelectionList(caption, current_selection, buf);
+
+    switch(current_selection) {
+      case 1:
+        rotateTools = 0;
+        break;
+      
+      case 2:
+        rotateTools = 1;
+        break;
+
+      case 3:
+        rotateTools = 3;
+        break;
+
+      default:
+        stopMenu = true;
+        break;
+    }
+    if(current_selection >= 1 && current_selection <= 3) {
+      EEPROM.update(EEP_ROTATE_ADR, rotateTools);
+      stopMenu = true;
+    }
+  } while(!stopMenu);
+}
 
 
 void reboot() {
@@ -408,51 +478,64 @@ void drawSamplingStat(char* buf) {
   display.drawBox(0, y-2, display.getDisplayWidth(), display.getDisplayHeight()-y-1);
   display.setDrawColor(1);
   int x = display.getDisplayWidth() - display.getStrWidth(buf) - 2;
-  display.setCursor(x, y); display.print(buf);
+  display.drawStr(x, y, buf);
   setFontBig();
 }
 
 void showParams() {
-  int x, y;
+  int x, y, h, w;
   char buf[30];
   // this can be interrupted by either Next or Prev buttons
   if(digitalRead(PREV_PIN) == LOW || digitalRead(NEXT_PIN) == LOW) {
     isInit = false;
     return;
   }
-  y = 10; x = 5;
+  y = 2; x = 2; 
+  h = display.getMaxCharHeight()+5, w = display.getDisplayWidth();
   setFontSmall();
-  int h = display.getMaxCharHeight()+4;
-  display.setCursor(x, y); display.print(F("*Smart-FB*"));  y+= h+10;
-  display.setCursor(x, y); display.print(F("Timeout"));     y+= h;
-  sprintf_P (buf, PSTR("%8d s"), runoutTrigger);
-  display.setCursor(x, y); display.print(buf);              y+= h;
+  display.setFontMode(1);
+  display.drawBox(0, 0, w, h-2);
+  display.setDrawColor(2);
+  display.drawStr(x, y, "*Smart-FB*");                    y += h+2;
+  display.setFontMode(0);
+  display.setDrawColor(1);
+  x = 0;
+  display.drawStr(x, y, "Timeout");                       y += h;
+  sprintf_P (buf, PSTR("[T%d] %d s"), tool, runoutTrigger);
+  x = w-display.getStrWidth(buf)-2;
+  display.drawStr(x, y, buf);                             y += h;
+  x = 0;
+  display.drawHLine(x, y-4, w);
 
-  display.setCursor(x, y); display.print(F("Mode/Dev"));    y+= h;
+  display.drawStr(x, y, "Mode/Dev.");                     y += h;
   if(deviceMode == 0)
     sprintf_P (buf, PSTR("%10s"), "Normal");
   else {
-    sprintf_P (buf, PSTR("%6s: %1d%c"), "Chain", device, lastDevice ? 'L' : '+');
+    sprintf_P (buf, PSTR("%6s: %1d%c"), "Chain", device, lastDevice>0 ? 'L' : '+');
   }
-  display.setCursor(x, y); display.print(buf);              y+= h;
+  x = w-display.getStrWidth(buf)-2;
+  display.drawStr(x, y, buf);                             y += h;
+  x = 0;
+  display.drawHLine(x, y-4, w);
 
-  display.setCursor(x, y); display.print(F("Sensor MIN"));  y+= h;
-  sprintf_P (buf, PSTR("%7d Gs"), gaussMin);
-  display.setCursor(x, y); display.print(buf);              y+= h;
-  /*
-  display.setCursor(x, y); display.print(F("Sensor MAX"));  y+= h;
-  sprintf_P (buf, PSTR("%7d Gs"), gaussMax);
-  display.setCursor(x, y); display.print(buf);
-  */
+  display.drawStr(x, y, "Sensor");                    y += h;
+  sprintf_P (buf, PSTR("min %3d Gs"), gaussMin);
+  x = w-display.getStrWidth(buf)-2;
+  display.drawStr(x, y, buf);                             y += h-4;
+  sprintf_P (buf, PSTR("max %3d Gs"), gaussMax);
+  x = w-display.getStrWidth(buf)-2;
+  display.drawStr(x, y, buf);
 }
+
 
 void draw() {
 
   int x, y;
   char buf[30];
 
+  display.setFontPosTop();
   // show parameters set in EEPROM after startup for a couple seconds
-  if(seconds < INFO_TIMEOUT && isInit) {
+  if(seconds < infoTimeout && isInit) {
     showParams();
     return;
   }
@@ -460,23 +543,26 @@ void draw() {
     isInit = false;
   }
   setFontBig();
-  display.setFontPosTop();
 
   for(int8_t i=0; i< MAX_SENSOR; i++) {
-    y = i*20+12; x = 5;
+    y = i*21+10; x = 5;
+    display.setFontDirection(rotateTools);
+    if(rotateTools == 1) {
+      x =  (i % 2 == 0) ? 14 : 27;
+      y -= 4;
+    }
+    else if(rotateTools == 3) {
+      x =  (i % 2 == 0) ? 7 : 20;
+      y += 15;
+    }
     // draw tool number
     sprintf_P(buf, PSTR("T%d"), i+(device*MAX_SENSOR));
-    display.setCursor(x, y); display.print(buf);
+    display.drawStr(x,y, buf);
+    display.setFontDirection(0);
     // draw status of filament presence
     x = (i % 2 == 0) ? 45 : 58;
-    y = i*20+18;
-    if(tool == -1) {
-      if(!runout[i])
-        display.drawDisc(x, y, 5, U8G2_DRAW_ALL);
-      else
-        display.drawCircle(x, y, 5, U8G2_DRAW_ALL);
-    }
-    else if(tool == i) {
+    y = i*21+16;
+    if(tool == -1 || tool == i+(device*MAX_SENSOR)) {
       if(!runout[i])
         display.drawDisc(x, y, 5, U8G2_DRAW_ALL);
       else
@@ -489,14 +575,14 @@ void draw() {
       display.setDrawColor(1);
     }
   }
-  y += 18;
+  y += 13;
   // draw run-out if detected
   setFontSmall();
   if(runoutTime > 0) {
     if(runoutTrigger - (seconds - runoutTime) <= 0)
       sprintf_P(buf, PSTR("RUNOUT"));
     else
-      sprintf_P(buf, PSTR("T-%d"), runoutTrigger - (seconds - runoutTime));
+      sprintf_P(buf, PSTR("Rt-%d"), runoutTrigger - (seconds - runoutTime));
   }
   else {
     sprintf_P(buf, PSTR(" "));
@@ -510,9 +596,11 @@ void draw() {
     display.setDrawColor(1);
   }
   x = display.getDisplayWidth() - display.getStrWidth(buf) -2;
-  display.setCursor(x, y); display.print(buf);
+  display.drawStr(x, y, buf);
+  setFontBig();
 
   if(deviceMode != 0 && lastDevice == 0) {
+      // draw status of the (next) chained device
       if(triggerIn) {
         display.drawBox(0, y+1, 6, 6);
       }
@@ -565,8 +653,15 @@ void readSensors() {
         return;
       }
     }
-    if(runoutTime == 0)
+    if(runoutTime == 0) {
+      if(seconds + runoutTrigger >= MAX_SECONDS) {
+        // prevent an overflow
+        noInterrupts();
+        seconds = 0;
+        interrupts();
+      }
       runoutTime = seconds;
+    }
     if(seconds - runoutTime >= runoutTrigger) {
       signalRunout(true);
     }
@@ -605,6 +700,7 @@ void setDefaults() {
   display.clearDisplay();
 
   if(display.userInterfaceMessage(t1, t2, t3, btn)!=1) {
+    setFontBig();
     return;
   }
   runoutTrigger = DEFAULT_TRIGGER;
@@ -616,6 +712,8 @@ void setDefaults() {
   EEPROM.put(EEP_DEVICE_ADR, 0);
   EEPROM.put(EEP_DEVMODE_ADR, 0);
   EEPROM.put(EEP_DEVLAST_ADR, 0);
+  EEPROM.put(EEP_TOOL_ADR, -1);
+  EEPROM.put(EEP_ROTATE_ADR, 0);
   reboot();
 }
 
@@ -629,6 +727,7 @@ bool setChained() {
   display.clearDisplay();
 
   if(display.userInterfaceMessage(t1, t2, t3, btn)!=1) {
+    setFontBig();
     return false;
   }
   setFontBig();
@@ -650,7 +749,7 @@ void setupTimer() {
 
 ISR(TIMER1_OVF_vect)
 {
-  if(seconds < 3600)
+  if(seconds < MAX_SECONDS)
     seconds++;
   else
     seconds = 0;
@@ -660,71 +759,80 @@ ISR(TIMER1_OVF_vect)
 void menuInterrupt() {
   showMenu = false;
   if(isPowerSave) {
-    screenSaver = seconds;
-    isPowerSave = false;
+    resetScreenSaver();
     return;
   }
-  if(seconds - screenSaver > 2)
+  if(seconds - screenSaver >= 1 && !isInit)
     showMenu = true;
 }
 
 void handleSerial(String& in) {
   // __log(PSTR("[IN]\t %s"), in.c_str());
-  if(in.charAt(0) == 'T') {
-    // either set or query active tool
-    if(in.charAt(1) != '?') {
-      long t = in.substring(1).toInt();
-      if(t >= -1 && t < MAX_SENSOR)
-        tool = (int8_t)t;
-    }
-    __log(PSTR("T%d"), tool);
-  }
-  else if(in.charAt(0) == 'N') {
-    // either set or query Gauss Min value
-    if(in.charAt(1) == '?') {
-      __log(PSTR("Gauss Min.: %d"), gaussMin);
-    }  
-    else {
-      long g = in.substring(1).toInt();
-      if(g >= DEFAULT_SENSMIN)
-        gaussMin = (int)g;
-      EEPROM.put(EEP_SENSMIN_ADR, gaussMin);
-    }
-  }
-  else if(in.charAt(0) == 'X') {
-    // either set or query Gauss Max value
-    if(in.charAt(1) == '?') {
-      __log(PSTR("Gauss Max.: %d"), gaussMax);
-    }  
-    else {
-      long g = in.substring(1).toInt();
-      if(g < DEFAULT_SENSMAX)
-        gaussMax = (int)g;
-      EEPROM.put(EEP_SENSMAX_ADR, gaussMax);
-    }
+  
+  bool isQuery  = (in.length() >= 2 && in.charAt(1) == '?');
+
+  switch(in.charAt(0)) {
+    case 'T':       // either set or query active tool
+      if(!isQuery) {
+        long t = in.substring(1).toInt();
+        if(t >= -1 && t < MAX_TOOLS) {
+          tool = (int8_t)t;
+          EEPROM.put(EEP_TOOL_ADR, tool);
+        }
+      }
+      __log(PSTR("T%d"), tool);
+      break;
+
+    case 'N':       // either set or query Gauss Min value
+      if(isQuery) {
+        __log(PSTR("Gauss Min.: %d"), gaussMin);
+      }  
+      else {
+        long g = in.substring(1).toInt();
+        if(g >= DEFAULT_SENSMIN)
+          gaussMin = (int)g;
+        EEPROM.put(EEP_SENSMIN_ADR, gaussMin);
+      }
+      break;
+    case 'X':       // either set or query Gauss Max value
+      if(isQuery) {
+        __log(PSTR("Gauss Max.: %d"), gaussMax);
+      }  
+      else {
+        long g = in.substring(1).toInt();
+        if(g < DEFAULT_SENSMAX)
+          gaussMax = (int)g;
+        EEPROM.put(EEP_SENSMAX_ADR, gaussMax);
+      }
+      break;
+    case 'R':       // either set or query tool rotation
+      if(isQuery) {
+        __log(PSTR("Rotate tools.: %d deg."), rotateTools*90);
+      }  
+      else {
+        long r = in.substring(1).toInt();
+        switch(r) {
+          case 0: rotateTools = 0; break;
+          case 90: rotateTools = 1; break;
+          case 270: rotateTools = 3; break;
+          default: rotateTools = 0;
+        }
+        EEPROM.put(EEP_ROTATE_ADR, rotateTools);
+      }
+      break;
   }
 }
 
 void serialEvent() {
-  String in = Serial.readString();
+  String in = Serial.readStringUntil(0x0a);
   in.toUpperCase();
   handleSerial(in);
 }
 
-void __log(const char *fmt, ...) {
-  if(txDisabled)
-    return;
-  
-  char _log[256];
-  va_list arguments;
-  va_start(arguments, fmt);
-  vsnprintf_P(_log, ArraySize(_log) - 1, fmt, arguments);
-  va_end(arguments);
-  Serial.println(_log);
-}
-
 void setup() {
   Serial.begin(SERIAL_BAUDRATE);
+  Serial.setTimeout(15000);
+  Wire.setClock(400000L);
 
   scanI2C();
   __log(PSTR("I2C Scan complete"));
@@ -739,6 +847,7 @@ void setup() {
   }
   digitalWrite(TRIGGER_PIN, LOW);
   
+  analogReference(DEFAULT);
   for(int8_t i=0; i< MAX_SENSOR; i++) {
     pinMode(sensorsIn[i], INPUT);
   }
@@ -773,16 +882,25 @@ void setup() {
   EEPROM.get(EEP_DEVLAST_ADR, lastDevice);
   if(lastDevice == 0xFF)
     lastDevice = 0;
+  EEPROM.get(EEP_TOOL_ADR, tool);
+  if(tool == 0xFF)
+    tool = -1;
+  EEPROM.get(EEP_ROTATE_ADR, rotateTools);
+  if(rotateTools == 0xFF)
+    rotateTools = 0;
+
   // in Daisy-Chain mode TX pin becomes the SIG input pin
   // hence sending text to serial becomes unavailable
   if(deviceMode != 0) {
     __log(PSTR("Disabling TX pin"));
-    txDisabled = false;
+    Serial.flush();
+    txDisabled = true;
     UCSR0B &= ~bit (TXEN0);   // disable TX pin to be used as trigger input 
     pinMode(TRIGGERIN_PIN, INPUT);
   }
 
   __log(PSTR("Setup done"));
+  infoTimeout = seconds + INFO_TIMEOUT;
 }
 
 void loop() {
@@ -793,8 +911,24 @@ void loop() {
   if(showMenu) {
     if(!isInit)
       showMainMenu();
+    else
+      showMenu = false;
   }
   else {
+    if(digitalRead(PREV_PIN) == LOW && !isInit) {
+      isInit = true;
+      isPowerSave = false;
+      display.setPowerSave(0);
+      infoTimeout = seconds + INFO_TIMEOUT;
+      debounceButtons();
+    }
+    if(digitalRead(NEXT_PIN) == LOW && !isInit) {
+      isPowerSave = false;
+      display.setPowerSave(0);
+      debounceButtons();
+      showSensors();
+    }
+
     display.setPowerSave(isPowerSave ? 1 : 0);
     readSensors();
     if(!isPowerSave) {
@@ -808,4 +942,26 @@ void loop() {
   if(seconds - screenSaver >= SCREEN_TIMEOUT) {
     isPowerSave = true;
   }
+}
+
+void debounceButtons() {
+  while(digitalRead(MENU_PIN) == LOW)
+    ;
+  while(digitalRead(PREV_PIN) == LOW)
+    ;
+  while(digitalRead(NEXT_PIN) == LOW)
+    ;
+}
+
+void __log(const char *fmt, ...) {
+  if(txDisabled)
+    return;
+  
+  char _log[128];
+  va_list arguments;
+  va_start(arguments, fmt);
+  vsnprintf_P(_log, ArraySize(_log) - 1, fmt, arguments);
+  va_end(arguments);
+  Serial.print(F("echo: "));
+  Serial.println(_log);
 }
